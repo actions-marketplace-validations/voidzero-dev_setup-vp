@@ -6,6 +6,21 @@ on:
   pull_request:
     branches: [main]
   merge_group:
+  workflow_dispatch:
+    inputs:
+      pr_version:
+        description: "pkg.pr.new PR number or commit SHA to test an unreleased Vite+ build (e.g. 1569). Leave empty to test the latest published release."
+        required: false
+        default: ""
+
+# Push / PR / merge_group runs always test the latest published Vite+. A manual
+# workflow_dispatch can set pr_version to a PR number or commit SHA; the install
+# script picks it up via VP_PR_VERSION, which overrides VP_VERSION and pulls the
+# matching build from pkg.pr.new — so a new Vite+ release can be verified across
+# the whole matrix before it ships. The value is empty on every other event,
+# which the install script treats as "unset" and falls back to the latest release.
+env:
+  VP_PR_VERSION: ${{ github.event.inputs.pr_version }}
 
 jobs:
   test:
@@ -15,12 +30,11 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
 
       - name: Setup Vite+
         uses: ./
         with:
-          version: latest
           run-install: false
           cache: false
 
@@ -31,16 +45,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["22", "24"]
+        node-version: ["lts", "20", "22", "24"]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
 
+      # Create the throwaway fixture under $RUNNER_TEMP, outside the repo. The
+      # repo commits a pnpm-workspace.yaml (for the release-age exclude), so a
+      # fixture inside the repo would be treated as part of this repo's
+      # workspace and `vp install`/`vp run` would resolve to the repo root.
+      # ${RUNNER_TEMP//\\//} normalizes Windows backslashes for bash.
+      - name: Create test project
+        shell: bash
+        run: |
+          DIR="${RUNNER_TEMP//\\//}/test-project"
+          mkdir -p "$DIR"
+          # Pin pnpm to v10. Vite+'s bundled pnpm 11 requires node:sqlite
+          # (Node >= 22.5) and crashes on Node 20; pnpm 10 still runs on Node 20.
+          echo '{"name":"test-project","private":true,"packageManager":"pnpm@10.34.3"}' > "$DIR/package.json"
+
+      # Runs `vp env use <version>` then `vp install` in the test project.
       - name: Setup Vite+ with Node.js ${{ matrix.node-version }}
         uses: ./
         with:
           node-version: ${{ matrix.node-version }}
-          run-install: false
+          run-install: |
+            - cwd: ${{ runner.temp }}/test-project
           cache: false
 
       - name: Verify installation
@@ -51,12 +81,107 @@ jobs:
         run: |
           ACTUAL=$(node --version)
           echo "Node.js version: $ACTUAL"
-          echo "$ACTUAL" | grep -q "^v${{ matrix.node-version }}\." || (echo "Expected Node.js v${{ matrix.node-version }}.x but got $ACTUAL" && exit 1)
+          if [ "${{ matrix.node-version }}" != "lts" ]; then
+            echo "$ACTUAL" | grep -q "^v${{ matrix.node-version }}\." || (echo "Expected Node.js v${{ matrix.node-version }}.x but got $ACTUAL" && exit 1)
+          fi
+
+  test-default-version:
+    # End-to-end check of the default version-resolution logic: with no `version`
+    # or `version-file` input, the action auto-detects the vite-plus version from
+    # the project's package.json (direct pin or catalog), and falls back to
+    # `latest` when it can't be resolved to an exact version (e.g. a semver
+    # range). Pin VP_PR_VERSION to "" so a manual pr_version dispatch can't
+    # override the version we assert on (a pkg.pr.new build would ignore
+    # VP_VERSION entirely). Fixtures live under $RUNNER_TEMP, outside the repo,
+    # so the committed pnpm-workspace.yaml doesn't influence resolution.
+    env:
+      VP_PR_VERSION: ""
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Pins an older exact version (not the current `latest`) so a match
+          # proves the pin was honored rather than a coincidental latest.
+          - scenario: exact
+            expected: "0.2.0"
+          - scenario: catalog
+            expected: "0.2.0"
+          # A package.json range resolves to the exact version pinned by the
+          # lockfile rather than falling back to latest.
+          - scenario: lockfile-pnpm
+            expected: "0.2.0"
+          - scenario: lockfile-npm
+            expected: "0.2.0"
+          # A range with no lockfile can't be resolved, so auto-detect falls back
+          # to `latest` instead of failing the run.
+          - scenario: fallback-range
+            expected: latest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      - name: Create ${{ matrix.scenario }} fixture
+        shell: bash
+        run: |
+          DIR="${RUNNER_TEMP//\\//}/default-version-${{ matrix.scenario }}"
+          mkdir -p "$DIR"
+          case "${{ matrix.scenario }}" in
+            exact)
+              echo '{"name":"fixture","private":true,"devDependencies":{"vite-plus":"0.2.0"}}' > "$DIR/package.json"
+              ;;
+            catalog)
+              echo '{"name":"fixture","private":true,"devDependencies":{"vite-plus":"catalog:"}}' > "$DIR/package.json"
+              printf 'catalog:\n  vite-plus: 0.2.0\n' > "$DIR/pnpm-workspace.yaml"
+              ;;
+            lockfile-pnpm)
+              echo '{"name":"fixture","private":true,"devDependencies":{"vite-plus":"^0.2.0"}}' > "$DIR/package.json"
+              printf 'importers:\n  .:\n    devDependencies:\n      vite-plus:\n        specifier: ^0.2.0\n        version: 0.2.0\n' > "$DIR/pnpm-lock.yaml"
+              ;;
+            lockfile-npm)
+              echo '{"name":"fixture","private":true,"devDependencies":{"vite-plus":"^0.2.0"}}' > "$DIR/package.json"
+              echo '{"name":"fixture","lockfileVersion":3,"packages":{"":{"devDependencies":{"vite-plus":"^0.2.0"}},"node_modules/vite-plus":{"version":"0.2.0"}}}' > "$DIR/package-lock.json"
+              ;;
+            fallback-range)
+              echo '{"name":"fixture","private":true,"devDependencies":{"vite-plus":"^0.2.0"}}' > "$DIR/package.json"
+              ;;
+          esac
+
+      - name: Setup Vite+ (auto-detect, no version input)
+        uses: ./
+        id: setup
+        with:
+          working-directory: ${{ runner.temp }}/default-version-${{ matrix.scenario }}
+          run-install: false
+          cache: false
+
+      - name: Assert resolved version
+        shell: bash
+        env:
+          EXPECTED: ${{ matrix.expected }}
+          ACTUAL: ${{ steps.setup.outputs.version }}
+        run: |
+          echo "scenario=${{ matrix.scenario }} expected=$EXPECTED actual=$ACTUAL"
+          if [ -z "$ACTUAL" ] || [ "$ACTUAL" = "unknown" ]; then
+            echo "::error::action did not report an installed version (got '$ACTUAL')"
+            exit 1
+          fi
+          if [ "$EXPECTED" = "latest" ]; then
+            # `latest` moves, so require a concrete semver (the output is the
+            # resolved global version, never the tag) rather than a literal.
+            echo "$ACTUAL" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' || {
+              echo "::error::fallback did not resolve to a semver version: '$ACTUAL'"
+              exit 1
+            }
+          elif [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::expected vite-plus $EXPECTED but the action installed $ACTUAL"
+            exit 1
+          fi
+          echo "OK: ${{ matrix.scenario }} resolved to $ACTUAL"
 
   test-cache-pnpm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
 
       - name: Create test project with pnpm-lock.yaml
         run: |
@@ -82,7 +207,7 @@ jobs:
   test-cache-npm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
 
       - name: Create test project with package-lock.json
         run: |
@@ -108,7 +233,7 @@ jobs:
   test-cache-yarn:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
 
       - name: Create test project with yarn.lock
         run: |
@@ -131,16 +256,453 @@ jobs:
           echo "Installed version: ${{ steps.setup.outputs.version }}"
           echo "Cache hit: ${{ steps.setup.outputs.cache-hit }}"
 
-  build:
+  test-cache-bun:
+    strategy:
+      fail-fast: false
+      matrix:
+        lockfile: [bun.lock, bun.lockb]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      - name: Create test project with ${{ matrix.lockfile }}
+        run: |
+          mkdir -p test-project
+          cd test-project
+          echo '{"name":"test-project","private":true}' > package.json
+          touch ${{ matrix.lockfile }}
+
+      - name: Setup Vite+ with bun cache (${{ matrix.lockfile }})
+        uses: ./
+        id: setup
+        with:
+          run-install: false
+          cache: true
+          cache-dependency-path: test-project/${{ matrix.lockfile }}
+
+      - name: Verify installation
+        run: |
+          vp --version
+          echo "Installed version: ${{ steps.setup.outputs.version }}"
+          echo "Cache hit: ${{ steps.setup.outputs.cache-hit }}"
+
+  test-vp-exec:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      - name: Setup Vite+
+        uses: ./
+        with:
+          run-install: false
+          cache: false
+
+      - name: Verify vp exec works
+        run: vp exec node -e "console.log('vp exec works')"
+
+  test-vp-install-and-exec:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      # Fixture lives under $RUNNER_TEMP (outside the repo) so the committed
+      # pnpm-workspace.yaml doesn't make vp resolve it to the repo root.
+      - name: Create test project
+        shell: bash
+        run: |
+          DIR="${RUNNER_TEMP//\\//}/test-project"
+          mkdir -p "$DIR"
+          echo '{"name":"test-project","private":true,"scripts":{"hello":"node -e \"console.log(1+1)\""}}' > "$DIR/package.json"
+
+      - name: Setup Vite+ with install
+        uses: ./
+        with:
+          run-install: |
+            - cwd: ${{ runner.temp }}/test-project
+          cache: false
+
+      - name: Verify vp exec in project
+        working-directory: ${{ runner.temp }}/test-project
+        run: vp exec node -e "console.log('vp exec in project works')"
+
+      - name: Verify vp run in project
+        working-directory: ${{ runner.temp }}/test-project
+        run: vp run hello
+
+  test-registry-url:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      - name: Setup Vite+ with registry-url
+        uses: ./
+        with:
+          run-install: false
+          cache: false
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@voidzero-dev"
+
+      - name: Verify .npmrc was created
+        run: |
+          echo "NPM_CONFIG_USERCONFIG=$NPM_CONFIG_USERCONFIG"
+          cat "$NPM_CONFIG_USERCONFIG"
+          grep -q "@voidzero-dev:registry=https://npm.pkg.github.com/" "$NPM_CONFIG_USERCONFIG"
+          grep -q "_authToken=\${NODE_AUTH_TOKEN}" "$NPM_CONFIG_USERCONFIG"
+
+      - name: Verify NODE_AUTH_TOKEN is exported
+        run: |
+          echo "NODE_AUTH_TOKEN is set: ${NODE_AUTH_TOKEN:+yes}"
+
+  test-alpine-container:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.24
+    steps:
+      - name: Install Alpine dependencies
+        run: apk add --no-cache bash curl gcompat libstdc++
+
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      - name: Setup Vite+
+        uses: ./
+        with:
+          run-install: false
+          cache: false
+
+      - name: Verify installation
+        run: vp --version
+
+      - name: Verify vp exec works
+        run: vp exec node -e "console.log('vp exec works in Alpine')"
+
+  test-sfw:
+    # sfw wraps vp install end-to-end on all OSes (macOS / Windows supported
+    # since vite-plus v0.1.23). On Linux we verify across every package
+    # manager vp auto-detects via lockfile (pnpm/npm/yarn/bun); macOS / Windows
+    # run pnpm only because the PM choice doesn't change the sfw wrap path —
+    # those cells exist to prove the cross-platform sfw download + wrap works.
+    # vp version follows the workflow default (`latest`, or the pr_version
+    # pkg.pr.new build on manual dispatch via VP_PR_VERSION) — sfw is decoupled
+    # from vp's release channel, so it just rides whatever vp the rest of the
+    # matrix is testing.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        package-manager: [pnpm, npm, yarn, bun]
+        exclude:
+          # Non-Linux runs pnpm only — PM diversity adds no sfw-wrap coverage.
+          - { os: macos-latest, package-manager: npm }
+          - { os: macos-latest, package-manager: yarn }
+          - { os: macos-latest, package-manager: bun }
+          - { os: windows-latest, package-manager: npm }
+          - { os: windows-latest, package-manager: yarn }
+          - { os: windows-latest, package-manager: bun }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      # Fixture lives under $RUNNER_TEMP (outside the repo) so the committed
+      # pnpm-workspace.yaml doesn't make vp resolve it to the repo root.
+      - name: Create test project for ${{ matrix.package-manager }}
+        shell: bash
+        run: |
+          case "${{ matrix.package-manager }}" in
+            pnpm) LOCKFILE=pnpm-lock.yaml; CONTENTS='' ;;
+            npm)  LOCKFILE=package-lock.json; CONTENTS='{"name":"test-project","lockfileVersion":3}' ;;
+            yarn) LOCKFILE=yarn.lock; CONTENTS='' ;;
+            bun)  LOCKFILE=bun.lock; CONTENTS='' ;;
+            *)    echo "Unsupported package-manager: ${{ matrix.package-manager }}" >&2; exit 1 ;;
+          esac
+          DIR="${RUNNER_TEMP//\\//}/test-project"
+          mkdir -p "$DIR"
+          echo '{"name":"test-project","private":true,"dependencies":{"is-odd":"^3.0.1"}}' > "$DIR/package.json"
+          printf '%s' "$CONTENTS" > "$DIR/$LOCKFILE"
+
+      - name: Configure Yarn .yarnrc.yml (Linux + yarn only)
+        if: matrix.package-manager == 'yarn' && runner.os == 'Linux'
+        # nodeLinker=node-modules: Yarn Berry defaults to Plug'n'Play, which
+        #   makes plain `require()` from a non-yarn-wrapped node process fail.
+        # enableImmutableInstalls=false: Yarn Berry auto-enables immutable
+        #   installs under CI, which makes the bootstrap from an empty
+        #   yarn.lock fail with YN0028. Setting it here (instead of via the
+        #   YARN_ENABLE_IMMUTABLE_INSTALLS env var) survives any future
+        #   env-sanitization vp might apply to spawned subprocesses.
+        shell: bash
+        run: |
+          {
+            echo "nodeLinker: node-modules"
+            echo "enableImmutableInstalls: false"
+          } > "${RUNNER_TEMP//\\//}/test-project/.yarnrc.yml"
+
+      - name: Setup Vite+ with sfw + ${{ matrix.package-manager }}
+        uses: ./
+        with:
+          sfw: true
+          run-install: |
+            - cwd: ${{ runner.temp }}/test-project
+          cache: false
+
+      - name: Verify sfw is on PATH
+        run: sfw --version
+
+      - name: Verify dependency installed via ${{ matrix.package-manager }}
+        working-directory: ${{ runner.temp }}/test-project
+        run: vp exec node -e "console.log(require('is-odd')(3))"
+
+  test-sfw-alpine:
+    # vp version follows the workflow default (`latest`, or a pr_version
+    # pkg.pr.new build on manual dispatch) — sfw's musl asset selection is
+    # decoupled from vp's release channel.
+    # NOTE: if this job is later re-matrixed (multiple vp builds, multiple
+    # alpine versions, etc.), restore `strategy: { fail-fast: false }` so a
+    # flake in one shard doesn't cancel the others.
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.24
+    steps:
+      - name: Install Alpine dependencies
+        run: apk add --no-cache bash curl gcompat libstdc++
+
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      # Fixture lives outside the repo so the committed pnpm-workspace.yaml
+      # doesn't make vp resolve it to the repo root. This is a container job:
+      # ${{ runner.temp }} would expand to the HOST path, but the shell and the
+      # action both run inside the container (where RUNNER_TEMP maps to /__w/_temp),
+      # so a host path passed via YAML wouldn't exist in the container. Use a
+      # literal in-container path (/tmp, outside the /__w workspace mount) that
+      # needs no host<->container translation.
+      - name: Create test project with a real dependency
+        run: |
+          mkdir -p /tmp/test-project
+          echo '{"name":"test-project","private":true,"dependencies":{"is-odd":"^3.0.1"}}' > /tmp/test-project/package.json
+
+      - name: Setup Vite+ with sfw (musl)
+        uses: ./
+        with:
+          sfw: true
+          run-install: |
+            - cwd: /tmp/test-project
+          cache: false
+
+      - name: Verify sfw is on PATH (musl)
+        run: sfw --version
+
+      - name: Verify dependency installed under sfw (musl)
+        working-directory: /tmp/test-project
+        run: vp exec node -e "console.log(require('is-odd')(3))"
+
+  test-sfw-blocks-malicious:
+    # Verifies sfw actually intercepts a known-malicious package, not just
+    # that it wraps the install. Uses `lodahs` (lodash typosquat), the same
+    # canary SocketDev's own workflows use:
+    # https://github.com/SocketDev/bun-security-scanner/blob/main/.github/workflows/test.yml
+    # If this job ever stops blocking, either sfw is misconfigured or the
+    # canary itself has been delisted — swap it for another Socket-flagged
+    # package from https://socket.dev/blog/category/threat-research.
+    # vp version follows the workflow default (`latest`, or a pr_version
+    # pkg.pr.new build on manual dispatch) — sfw block behavior is decoupled
+    # from vp's release channel.
+    # Runs on all three OSes: a fail-open regression in vp/sfw's proxy or CA
+    # handling can be platform-specific (the #73 rustls cert-trust class of
+    # bug was), so each OS needs its own block assertion — benign-install
+    # success (the test-sfw job) is not enough proof.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      # Fixture lives under $RUNNER_TEMP (outside the repo) so the committed
+      # pnpm-workspace.yaml doesn't make vp resolve it to the repo root.
+      - name: Create test project with a benign dependency
+        shell: bash
+        run: |
+          DIR="${RUNNER_TEMP//\\//}/test-project"
+          mkdir -p "$DIR"
+          echo '{"name":"test-project","private":true,"dependencies":{"is-odd":"^3.0.1"}}' > "$DIR/package.json"
+
+      - name: Setup Vite+ with sfw and install benign dep
+        uses: ./
+        with:
+          sfw: true
+          run-install: |
+            - cwd: ${{ runner.temp }}/test-project
+          cache: false
+
+      - name: Assert sfw blocks malicious package (lodahs typosquat of lodash)
+        shell: bash
+        working-directory: ${{ runner.temp }}/test-project
+        # Exit code alone isn't sufficient: a non-zero exit from npm 404,
+        # network blip, or vp crash would also produce a false positive. We
+        # also require the literal sfw block-line for lodahs in the combined
+        # output so an unrelated failure doesn't get reported as "sfw blocked
+        # it". The block-line format observed in CI is:
+        #   " - blocked npm package: name: lodahs; version: ...; reason: ..."
+        # The banner "Protected by Socket Firewall" and the "=== Socket
+        # Firewall ===" header are emitted on EVERY sfw invocation, so neither
+        # of those is a usable marker — use the unique "blocked npm package:
+        # name: lodahs" line instead.
+        run: |
+          set +e
+          OUTPUT=$(sfw vp install lodahs 2>&1)
+          CODE=$?
+          set -e
+          printf '%s\n' "$OUTPUT"
+          if [ "$CODE" -eq 0 ]; then
+            echo "::error::sfw failed to block lodahs on ${{ matrix.os }} — install exited 0"
+            exit 1
+          fi
+          if ! printf '%s' "$OUTPUT" | grep -qF -- "blocked npm package: name: lodahs"; then
+            echo "::error::sfw vp install exited $CODE on ${{ matrix.os }} but the lodahs block-line was not in the output — likely failed for a non-sfw reason (canary delisted, network blip, vp crash, or sfw output format changed). Swap the canary if Socket has delisted lodahs, or update the marker grep if sfw's block-line format changed."
+            exit 1
+          fi
+          echo "OK: sfw blocked lodahs on ${{ matrix.os }} (exit $CODE, block-line found)"
+
+  test-sfw-with-socketdev-action:
+    # Exercises the composition path: install sfw via the upstream
+    # `socketdev/action@<sha>` step first, then call setup-vp with `sfw:
+    # true`. setup-vp should DETECT the pre-installed sfw on PATH (via
+    # findSfwOnPath()) and SKIP its bundled download. We assert that by
+    # checking $RUNNER_TEMP/sfw-bin/sfw[.exe] — the exact path
+    # installSfw() would have created — was NOT created. We also assert the
+    # composed sfw actually BLOCKS a malicious package (lodahs), so this path
+    # is proven to enforce, not just to be wired up.
+    # See README "Advanced: stricter supply chain via socketdev/action".
+    runs-on: ubuntu-latest
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      # Fixture lives under $RUNNER_TEMP (outside the repo) so the committed
+      # pnpm-workspace.yaml doesn't make vp resolve it to the repo root.
+      - name: Create test project with a real dependency
+        shell: bash
+        run: |
+          DIR="${RUNNER_TEMP//\\//}/test-project"
+          mkdir -p "$DIR"
+          echo '{"name":"test-project","private":true,"dependencies":{"is-odd":"^3.0.1"}}' > "$DIR/package.json"
+
+      - name: Install sfw via socketdev/action
+        uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f
+        with:
+          mode: firewall-free
+
+      - name: Setup Vite+ with sfw (composition path)
+        uses: ./
+        id: setup-vp
+        with:
+          sfw: true
+          run-install: |
+            - cwd: ${{ runner.temp }}/test-project
+          cache: false
+
+      - name: Verify setup-vp used the composed sfw (no bundled download)
+        shell: bash
+        # Negative assertion: if setup-vp had downloaded its own sfw, it
+        # would land at $RUNNER_TEMP/sfw-bin/sfw[.exe] (per
+        # getSfwBinDir() in install-sfw.ts). On the composition path the
+        # PATH-detection branch should fire FIRST and skip the download
+        # entirely, so neither file should exist.
+        run: |
+          if [ -e "$RUNNER_TEMP/sfw-bin/sfw" ] || [ -e "$RUNNER_TEMP/sfw-bin/sfw.exe" ]; then
+            echo "::error::setup-vp downloaded its own sfw binary even though one was pre-installed via socketdev/action. The PATH-detection branch in setupSfw() regressed."
+            exit 1
+          fi
+          echo "OK: setup-vp used the pre-installed sfw (no bundled download at \$RUNNER_TEMP/sfw-bin/)"
+
+      - name: Verify dependency installed under composed sfw
+        working-directory: ${{ runner.temp }}/test-project
+        run: vp exec node -e "console.log(require('is-odd')(3))"
+
+      - name: Assert composed sfw blocks malicious package (lodahs)
+        shell: bash
+        working-directory: ${{ runner.temp }}/test-project
+        # Proves the composition path actually enforces, not just that sfw is
+        # present. socketdev/action exports SFW_JSON_REPORT_PATH into the env,
+        # which makes sfw write its block report to JSON instead of stdout —
+        # we unset it here so the block-line goes to stdout, matching the
+        # marker check used by test-sfw-blocks-malicious.
+        run: |
+          unset SFW_JSON_REPORT_PATH
+          set +e
+          OUTPUT=$(sfw vp install lodahs 2>&1)
+          CODE=$?
+          set -e
+          printf '%s\n' "$OUTPUT"
+          if [ "$CODE" -eq 0 ]; then
+            echo "::error::composed sfw failed to block lodahs — install exited 0"
+            exit 1
+          fi
+          if ! printf '%s' "$OUTPUT" | grep -qF -- "blocked npm package: name: lodahs"; then
+            echo "::error::composed sfw vp install exited $CODE but the lodahs block-line was not in the output (canary delisted, network blip, or sfw output format changed)."
+            exit 1
+          fi
+          echo "OK: composed sfw blocked lodahs (exit $CODE, block-line found)"
+
+  test-azure-runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      - name: Setup Vite+
+        uses: ./
+        with:
+          run-install: true
+          cache: false
+
+      - name: Build portable bundles
+        run: vp run build
+
+      - name: Verify Azure runtime invalid phase smoke test
+        shell: bash
+        run: |
+          if node dist/azure/index.mjs invalid-phase; then
+            echo "::error::Azure runtime accepted an invalid phase"
+            exit 1
+          fi
+
+      - name: Verify bootstrap syntax (Unix)
+        if: runner.os != 'Windows'
+        run: bash -n azure/bootstrap.sh gitlab/bootstrap.sh
+
+      - name: Verify bootstrap syntax (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          [scriptblock]::Create((Get-Content -Raw azure/bootstrap.ps1)) > $null
+
+  build:
+    runs-on: ubuntu-latest
+    # This job verifies the action's own artifacts (dist/ committed and up to
+    # date, types, unit tests). Pin it to the latest published Vite+ even on a
+    # pr_version dispatch: a pre-release bundler could shift dist/ output and
+    # fail the "dist is up to date" diff for reasons unrelated to the change.
+    env:
+      VP_PR_VERSION: ""
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
 
       - name: Setup Vite+ with cache
         uses: ./
         id: setup
         with:
           cache: true
+          node-version-file: .node-version
 
       - name: Type check
         run: vp run typecheck

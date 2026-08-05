@@ -1,6 +1,6 @@
 {
   "name": "setup-vp",
-  "version": "1.0.0",
+  "version": "1.16.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,25 +10,21 @@
     "typecheck": "tsc --noEmit",
     "test": "vp test run",
     "test:watch": "vp test -w",
-    "prepare": "husky"
+    "prepare": "vp config"
   },
   "dependencies": {
-    "@actions/cache": "^4.1.0",
-    "@actions/core": "^1.11.1",
-    "@actions/exec": "^1.1.1",
-    "@actions/glob": "^0.5.1",
+    "@actions/cache": "^6.0.0",
+    "@actions/core": "^3.0.0",
+    "@actions/exec": "^3.0.0",
+    "@actions/glob": "^0.7.0",
     "yaml": "^2.8.2",
-    "zod": "^3.25.76"
+    "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@types/node": "^22.19.11",
-    "husky": "^9.1.7",
-    "lint-staged": "^16.2.7",
-    "typescript": "^5.9.3",
-    "vite-plus": "latest"
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.0",
+    "vite": "catalog:",
+    "vite-plus": "catalog:"
   },
-  "lint-staged": {
-    "*": "vp check --fix"
-  },
-  "packageManager": "pnpm@10.28.0"
+  "packageManager": "pnpm@11.18.0"
 }

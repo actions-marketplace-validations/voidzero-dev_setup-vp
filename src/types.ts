@@ -1,9 +1,9 @@
-import { z } from "zod";
+import { z } from "zod/mini";
 
 // Run install configuration schema
 export const RunInstallSchema = z.object({
-  cwd: z.string().optional(),
-  args: z.array(z.string()).optional(),
+  cwd: z.optional(z.string()),
+  args: z.optional(z.array(z.string())),
 });
 
 export const RunInstallInputSchema = z.union([
@@ -19,10 +19,16 @@ export type RunInstall = z.infer<typeof RunInstallSchema>;
 // Main inputs interface
 export interface Inputs {
   readonly version: string;
+  readonly versionFile?: string;
   readonly nodeVersion?: string;
+  readonly nodeVersionFile?: string;
+  readonly workingDirectory?: string;
   readonly runInstall: RunInstall[];
+  readonly sfw: boolean;
   readonly cache: boolean;
   readonly cacheDependencyPath?: string;
+  readonly registryUrl?: string;
+  readonly scope?: string;
 }
 
 // Lock file types
@@ -30,6 +36,7 @@ export enum LockFileType {
   Npm = "npm",
   Pnpm = "pnpm",
   Yarn = "yarn",
+  Bun = "bun",
 }
 
 export interface LockFileInfo {
@@ -55,3 +62,5 @@ export enum Outputs {
 
 // Package constants
 export const DISPLAY_NAME = "Vite+";
+// The published package name on the npm registry.
+export const PACKAGE_NAME = "vite-plus";

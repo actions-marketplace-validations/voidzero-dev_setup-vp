@@ -24,8 +24,13 @@ describe("getInputs", () => {
     const inputs = getInputs();
 
     expect(inputs).toEqual({
-      version: "latest",
+      version: "",
+      versionFile: undefined,
+      nodeVersion: undefined,
+      nodeVersionFile: undefined,
+      workingDirectory: undefined,
       runInstall: [],
+      sfw: false,
       cache: false,
       cacheDependencyPath: undefined,
     });
@@ -41,6 +46,18 @@ describe("getInputs", () => {
     const inputs = getInputs();
 
     expect(inputs.version).toBe("1.2.3");
+  });
+
+  it("should parse version-file input", () => {
+    vi.mocked(getInput).mockImplementation((name) => {
+      if (name === "version-file") return "package.json";
+      return "";
+    });
+    vi.mocked(getBooleanInput).mockReturnValue(false);
+
+    const inputs = getInputs();
+
+    expect(inputs.versionFile).toBe("package.json");
   });
 
   it("should parse run-install as true", () => {
@@ -103,6 +120,30 @@ describe("getInputs", () => {
     expect(inputs.cache).toBe(true);
   });
 
+  it("should parse sfw input", () => {
+    vi.mocked(getInput).mockReturnValue("");
+    vi.mocked(getBooleanInput).mockImplementation((name) => {
+      if (name === "sfw") return true;
+      return false;
+    });
+
+    const inputs = getInputs();
+
+    expect(inputs.sfw).toBe(true);
+  });
+
+  it("should parse node-version-file input", () => {
+    vi.mocked(getInput).mockImplementation((name) => {
+      if (name === "node-version-file") return ".nvmrc";
+      return "";
+    });
+    vi.mocked(getBooleanInput).mockReturnValue(false);
+
+    const inputs = getInputs();
+
+    expect(inputs.nodeVersionFile).toBe(".nvmrc");
+  });
+
   it("should parse cache-dependency-path input", () => {
     vi.mocked(getInput).mockImplementation((name) => {
       if (name === "cache-dependency-path") return "custom-lock.yaml";
@@ -113,5 +154,17 @@ describe("getInputs", () => {
     const inputs = getInputs();
 
     expect(inputs.cacheDependencyPath).toBe("custom-lock.yaml");
+  });
+
+  it("should parse working-directory input", () => {
+    vi.mocked(getInput).mockImplementation((name) => {
+      if (name === "working-directory") return "web";
+      return "";
+    });
+    vi.mocked(getBooleanInput).mockReturnValue(false);
+
+    const inputs = getInputs();
+
+    expect(inputs.workingDirectory).toBe("web");
   });
 });

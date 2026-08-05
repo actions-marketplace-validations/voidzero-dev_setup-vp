@@ -2,25 +2,35 @@ import { restoreCache as restoreCacheAction } from "@actions/cache";
 import { hashFiles } from "@actions/glob";
 import { warning, info, debug, saveState, setOutput } from "@actions/core";
 import { arch, platform } from "node:os";
+import { dirname } from "node:path";
 import type { Inputs } from "./types.js";
 import { State, Outputs } from "./types.js";
-import { detectLockFile, getCacheDirectories } from "./utils.js";
+import { detectLockFile, getCacheDirectories, getConfiguredProjectDir } from "./utils.js";
 
 export async function restoreCache(inputs: Inputs): Promise<void> {
+  const projectDir = getConfiguredProjectDir(inputs);
+
   // Detect lock file
-  const lockFile = detectLockFile(inputs.cacheDependencyPath);
+  const lockFile = detectLockFile(inputs.cacheDependencyPath, projectDir);
   if (!lockFile) {
-    warning("No lock file found. Skipping cache restore.");
+    const message = inputs.cacheDependencyPath
+      ? `No lock file found for cache-dependency-path: ${inputs.cacheDependencyPath}. Skipping cache restore.`
+      : `No lock file found in project directory: ${projectDir}. Skipping cache restore.`;
+    warning(message);
     setOutput(Outputs.CacheHit, false);
     return;
   }
 
   info(`Using lock file: ${lockFile.path}`);
+  const cacheCwd = dirname(lockFile.path);
+  info(`Resolving dependency cache directory in: ${cacheCwd}`);
 
   // Get cache directories based on lock file type
-  const cachePaths = await getCacheDirectories(lockFile.type);
+  const cachePaths = await getCacheDirectories(lockFile.type, cacheCwd);
   if (!cachePaths.length) {
-    warning("No cache directories found. Skipping cache restore.");
+    warning(
+      `No cache directories found for ${lockFile.type} in ${cacheCwd}. Skipping cache restore.`,
+    );
     setOutput(Outputs.CacheHit, false);
     return;
   }
