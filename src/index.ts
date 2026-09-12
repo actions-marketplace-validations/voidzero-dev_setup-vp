@@ -1,5 +1,7 @@
 import { saveState, getState, setFailed, info, setOutput, warning } from "@actions/core";
 import { exec, getExecOutput } from "@actions/exec";
+import { packageManagerArgs } from "./ci/package-manager.js";
+import { nodeManagerOffArgs } from "./ci/node-manager.js";
 import { getInputs } from "./inputs.js";
 import { installVitePlus } from "./install-viteplus.js";
 import { setupSfw } from "./install-sfw.js";
@@ -29,16 +31,24 @@ async function runMain(inputs: Inputs): Promise<void> {
   const version = resolveVitePlusVersion(inputs, projectDir);
   await installVitePlus({ ...inputs, version });
 
-  // Step 3: Set up Node.js. With node-manager: false, VP_NODE_MANAGER=no at
-  // install time only skips shim creation; vp commands would still resolve
-  // their internal JS runtime to managed Node, so also flip the config to
-  // system-first. Inputs validation guarantees nodeVersion is unset here.
+  const versionOutput =
+    inputs.nodeManager === false || inputs.packageManager !== undefined
+      ? (await getExecOutput("vp", ["--version"], { silent: true })).stdout
+      : "";
+  const packageManagerCommands = packageManagerArgs(inputs.packageManager, versionOutput);
+
+  // Step 3: Configure Node.js after installation so opting out leaves package managers enabled.
+  // Inputs validation guarantees nodeVersion is unset when node-manager is false.
   if (inputs.nodeManager === false) {
-    info("Disabling Vite+ Node.js version management via vp env off...");
-    await exec("vp", ["env", "off"]);
+    info("Disabling Vite+ Node.js version management...");
+    await exec("vp", nodeManagerOffArgs(versionOutput));
   } else if (nodeVersion) {
     info(`Setting up Node.js ${nodeVersion} via vp env use...`);
     await exec("vp", ["env", "use", nodeVersion]);
+  }
+
+  for (const args of packageManagerCommands) {
+    await exec("vp", args);
   }
 
   // Step 4: Configure registry authentication

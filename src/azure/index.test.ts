@@ -76,12 +76,13 @@ describe("Azure lifecycle", () => {
     expect(calls).toEqual(["auth", "parse", "sfw", "install", "version"]);
   });
 
-  it("prepare disables the node manager via vp env off when nodeManager is false", async () => {
+  it.each(["0.3.0", "0.3.1"])("prepare disables only Node.js on Vite+ %s", async (version) => {
     const run = vi.fn();
     await runPrepare(
       {
         SETUP_VP_VERSION: "latest",
         SETUP_VP_NODE_MANAGER: "false",
+        SETUP_VP_PACKAGE_MANAGER: version === "0.3.1" ? '{"pnpm":true,"bun":false}' : "",
         SYSTEM_DEFAULTWORKINGDIRECTORY: process.cwd(),
       },
       {
@@ -91,7 +92,7 @@ describe("Azure lifecycle", () => {
         setupSfw: async () => "vp",
         parseRunInstall: () => [],
         runInstall: () => undefined,
-        getCommandOutput: () => "vp v0.2.2",
+        getCommandOutput: () => `vp v${version}`,
         run,
         parseInstalledVpVersion: () => "0.2.2",
         prependPath: () => undefined,
@@ -101,7 +102,14 @@ describe("Azure lifecycle", () => {
       },
     );
 
-    expect(run).toHaveBeenCalledWith("vp", ["env", "off"]);
+    expect(run).toHaveBeenCalledWith(
+      "vp",
+      version === "0.3.0" ? ["env", "off"] : ["env", "off", "node"],
+    );
+    if (version === "0.3.1") {
+      expect(run).not.toHaveBeenCalledWith("vp", ["env", "on", "pm"]);
+      expect(run).toHaveBeenCalledWith("vp", ["env", "off", "bun"]);
+    }
   });
 
   it("prepare leaves the node manager alone when nodeManager is unset", async () => {

@@ -165,15 +165,10 @@ jobs:
             exit 1
           fi
 
-  # End-to-end check of node-manager: false. The installer must skip
-  # node/npm/npx/corepack shim creation (VP_NODE_MANAGER=no) and the action
-  # must run `vp env off`, so vp commands resolve the Node.js already on the
-  # runner instead of a managed one. Records the preinstalled Node.js binary,
-  # runs a real `vp install`, then asserts the binary is unchanged, no shims
-  # exist, and `vp exec` resolves the system Node.js. $VP_HOME/js_runtime is
-  # NOT asserted empty: the installer always downloads a managed Node LTS
-  # there to install vp's own production deps with a deterministic runtime
-  # (vite_setup install_production_deps), independent of VP_NODE_MANAGER.
+  # End-to-end check of node-manager: false. Node.js management is disabled
+  # while package-manager management keeps the installer defaults. Shims may
+  # remain on PATH, so compare process.execPath to verify that both `node`
+  # and `vp exec node` execute the runner's original Node.js after installation.
   test-node-manager-off:
     strategy:
       fail-fast: false
@@ -187,8 +182,8 @@ jobs:
         id: before
         shell: bash
         run: |
-          echo "path=$(command -v node)" >> "$GITHUB_OUTPUT"
-          echo "version=$(node --version)" >> "$GITHUB_OUTPUT"
+          echo "path=$(node -p 'process.execPath' | tr -d '\r')" >> "$GITHUB_OUTPUT"
+          echo "version=$(node --version | tr -d '\r')" >> "$GITHUB_OUTPUT"
 
       - name: Create test project
         shell: bash
@@ -211,8 +206,8 @@ jobs:
       - name: Verify system Node.js is untouched
         shell: bash
         run: |
-          ACTUAL_PATH=$(command -v node)
-          ACTUAL_VERSION=$(node --version)
+          ACTUAL_PATH=$(node -p 'process.execPath' | tr -d '\r')
+          ACTUAL_VERSION=$(node --version | tr -d '\r')
           echo "node before: ${{ steps.before.outputs.path }} (${{ steps.before.outputs.version }})"
           echo "node after:  $ACTUAL_PATH ($ACTUAL_VERSION)"
           if [ "$ACTUAL_PATH" != "${{ steps.before.outputs.path }}" ]; then
@@ -224,24 +219,70 @@ jobs:
             exit 1
           fi
 
-      - name: Verify no Node.js shims were created
-        shell: bash
-        run: |
-          SHIMS=$(ls "$HOME/.vite-plus/bin" | grep -E '^(node|npm|npx|corepack)' || true)
-          if [ -n "$SHIMS" ]; then
-            echo "::error::unexpected Node.js shims in $HOME/.vite-plus/bin: $SHIMS"
-            exit 1
-          fi
-
       - name: Verify vp commands use the system Node.js
         shell: bash
         run: |
+          EXEC_PATH=$(vp exec node -p 'process.execPath' | tr -d '\r')
           EXEC_VERSION=$(vp exec node --version | tr -d '\r')
+          echo "vp exec node -p process.execPath: $EXEC_PATH"
           echo "vp exec node --version: $EXEC_VERSION"
+          if [ "$EXEC_PATH" != "${{ steps.before.outputs.path }}" ]; then
+            echo "::error::vp resolved Node.js at $EXEC_PATH; expected system ${{ steps.before.outputs.path }}"
+            exit 1
+          fi
           if [ "$EXEC_VERSION" != "${{ steps.before.outputs.version }}" ]; then
             echo "::error::vp resolved Node.js $EXEC_VERSION; expected system ${{ steps.before.outputs.version }}"
             exit 1
           fi
+
+  test-package-manager:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        config:
+          - input: "true"
+            modes: '["managed", "managed", "managed", "managed"]'
+          - input: "false"
+            modes: '["system_first", "system_first", "system_first", "system_first"]'
+          - input: "{npm: false, pnpm: true, yarn: false}"
+            modes: '["system_first", "managed", "system_first", "managed"]'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      - name: Setup Vite+ with package-manager configuration
+        uses: ./
+        with:
+          package-manager: ${{ matrix.config.input }}
+          run-install: false
+          cache: false
+
+      # Query the real CLI so this covers input parsing, installation, and mode
+      # changes, including true and omitted entries in a partial mapping.
+      - name: Verify package-manager modes and independent Node.js management
+        shell: bash
+        env:
+          EXPECTED_MODES: ${{ matrix.config.modes }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+
+          const managers = ['npm', 'pnpm', 'yarn', 'bun'];
+          const modes = JSON.parse(process.env.EXPECTED_MODES);
+          for (const [index, manager] of managers.entries()) {
+            const { package_manager: current } = JSON.parse(
+              execFileSync('vp', ['env', 'current', manager, '--json'], { encoding: 'utf8' }),
+            );
+            console.log(`${manager}: ${current.mode}`);
+            assert.equal(current.mode, modes[index], `${manager} mode`);
+          }
+          const { node } = JSON.parse(
+            execFileSync('vp', ['env', 'current', 'node', '--json'], { encoding: 'utf8' }),
+          );
+          assert.equal(node.mode, 'managed', 'Node.js management must remain enabled');
+          NODE
 
   test-default-version:
     # End-to-end check of the default version-resolution logic: with no `version`
