@@ -121,7 +121,7 @@ export function getInstallScriptCommand(
 
     const script = `
 $dirsFile = $env:${VP_DIRS_FILE_ENV}
-Set-Content -LiteralPath $dirsFile -Value '' -NoNewline
+Set-Content -LiteralPath $dirsFile -Value '' -NoNewline -Encoding UTF8
 . ([scriptblock]::Create((irm -TimeoutSec ${PWSH_TIMEOUT_SEC} ${url})))
 $vpDir = if ($script:ShimDir) {
   $script:ShimDir
@@ -131,34 +131,46 @@ $vpDir = if ($script:ShimDir) {
   Join-Path $env:USERPROFILE '.vite-plus\\bin'
 }
 $vpPath = Join-Path $vpDir 'vp.exe'
-if (-not (Test-Path -LiteralPath $vpPath)) {
-  $vpPath = Join-Path $vpDir 'vp.cmd'
+if (-not (Test-Path -LiteralPath $vpPath -PathType Leaf)) {
+  throw "setup-vp requires vp.exe in the installed bin directory: $vpDir"
 }
-if (Test-Path -LiteralPath $vpPath) {
-  & $vpPath --version | Set-Content -LiteralPath $dirsFile
-  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-  $env:VP_DUMP_DIRS = '1'
-  & $vpPath | Add-Content -LiteralPath $dirsFile
-  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-}
+& $vpPath --version | Set-Content -LiteralPath $dirsFile -Encoding UTF8
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$env:VP_DUMP_DIRS = '1'
+& $vpPath | Add-Content -LiteralPath $dirsFile -Encoding UTF8
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 `.trim();
     return { command: "pwsh", args: ["-Command", script] };
   }
 
+  // Upstream installers read optional positional arguments without defaults.
+  // Do not inherit nounset from a caller that exports SHELLOPTS.
+  const download = `
+if command -v curl >/dev/null 2>&1; then
+  curl -fsSL ${CURL_TIMEOUT_FLAGS} "${url}"${detectDirs ? ' -o "$installer_file"' : ""}
+elif command -v wget >/dev/null 2>&1; then
+  wget -q -T 15 -t 1 -O ${detectDirs ? '"$installer_file"' : "-"} "${url}"
+else
+  echo "setup-vp: curl or wget is required to download the installer." >&2
+  exit 127
+fi
+`.trim();
   if (!detectDirs) {
     const script = `
+set +u
 set -o pipefail
-curl -fsSL ${CURL_TIMEOUT_FLAGS} ${url} | bash
+${download} | bash
 `.trim();
     return { command: "bash", args: ["-c", script] };
   }
 
   const script = `
+set +u
 set -eo pipefail
 installer_file="$(mktemp "\${TMPDIR:-/tmp}/setup-vp-install.XXXXXX")"
 trap 'rm -f "$installer_file"' EXIT
 : > "$${VP_DIRS_FILE_ENV}"
-curl -fsSL ${CURL_TIMEOUT_FLAGS} ${url} -o "$installer_file"
+${download}
 source "$installer_file"
 vp_dir="\${SHIM_DIR:-\${INSTALL_DIR:-\${VP_HOME:-$HOME/.vite-plus}}/bin}"
 if [ -x "$vp_dir/vp" ]; then

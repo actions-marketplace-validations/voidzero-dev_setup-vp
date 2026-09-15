@@ -13,7 +13,7 @@ function Setup-VpDownload {
   Invoke-WebRequest -Uri $Url -OutFile $OutFile -TimeoutSec 60
 }
 
-$setupRef = if ($env:SETUP_VP_SETUP_REF) { $env:SETUP_VP_SETUP_REF } else { 'v1' }
+$setupRef = if ($env:SETUP_VP_SETUP_REF) { $env:SETUP_VP_SETUP_REF } else { 'v1.20.0' }
 $runtimeOut = if ($env:SETUP_VP_RUNTIME_OUT) {
   $env:SETUP_VP_RUNTIME_OUT
 } else {
@@ -38,3 +38,4 @@ foreach ($chunkName in $chunkNames) {
 }
 
 & node $runtimeOut prepare
+if ($LASTEXITCODE -ne 0) { throw "setup-vp prepare failed with exit code $LASTEXITCODE" }

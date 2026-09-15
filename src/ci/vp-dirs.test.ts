@@ -1,4 +1,17 @@
 import { describe, expect, it } from "vite-plus/test";
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { getInstallScriptCommand, parseVitePlusDirs, supportsVitePlusDirs } from "./vp-dirs.js";
 
 describe("Vite+ directory resolution", () => {
@@ -53,15 +66,165 @@ describe("Vite+ directory resolution", () => {
     expect(command.args[1]).toContain('>> "$SETUP_VP_DIRS_FILE"');
   });
 
+  it.skipIf(process.platform === "win32").each([true, false])(
+    "isolates inherited nounset and preserves installer failures (detectDirs: %s)",
+    (detectDirs) => {
+      const fixture = mkdtempSync(join(tmpdir(), "setup-vp-shell-options-"));
+      const bin = join(fixture, "bin");
+      const installer = join(fixture, "installer.sh");
+      const dirsFile = join(fixture, "dirs");
+      const continued = join(fixture, "continued");
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, "curl"),
+        `#!/usr/bin/env bash
+if [ "$#" -eq 8 ]; then
+  cp "$SETUP_VP_TEST_INSTALLER" "$8"
+else
+  cat "$SETUP_VP_TEST_INSTALLER"
+fi
+`,
+      );
+      writeFileSync(
+        join(bin, "vp"),
+        `#!/usr/bin/env bash
+if [ "\${VP_DUMP_DIRS:-}" = "1" ]; then
+  printf 'data\\t/data\\nbin\\t/bin\\ncache\\t/cache\\nconfig\\t/config\\nstate\\t/state\\n'
+else
+  printf 'vp v0.3.0\\n'
+fi
+`,
+      );
+      chmodSync(join(bin, "curl"), 0o755);
+      chmodSync(join(bin, "vp"), 0o755);
+      const command = getInstallScriptCommand(
+        "https://example.com/install.sh",
+        "linux",
+        detectDirs,
+      );
+      const runInstaller = () =>
+        spawnSync(command.command, command.args, {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            SHELLOPTS: "nounset",
+            SETUP_VP_DIRS_FILE: dirsFile,
+            SETUP_VP_TEST_INSTALLER: installer,
+            SETUP_VP_TEST_SHIM_DIR: bin,
+            SETUP_VP_TEST_CONTINUED: continued,
+          },
+        });
+
+      try {
+        writeFileSync(
+          installer,
+          `set -e
+setup_vp_test_optional() { local optional="$4"; }
+setup_vp_test_optional one two three
+SHIM_DIR="$SETUP_VP_TEST_SHIM_DIR"
+printf 'installer completed\\n'
+`,
+        );
+        const success = runInstaller();
+        expect(success.status, success.stderr).toBe(0);
+        expect(success.stderr).toBe("");
+        expect(success.stdout).toContain("installer completed");
+        if (detectDirs) {
+          expect(parseVitePlusDirs(readFileSync(dirsFile, "utf8"))?.bin).toBe("/bin");
+        }
+
+        writeFileSync(installer, "exit 23\n");
+        expect(runInstaller().status).toBe(23);
+        if (detectDirs) {
+          writeFileSync(installer, "return 23\n");
+          expect(runInstaller().status).toBe(23);
+        }
+
+        writeFileSync(installer, 'set -e\nfalse\nprintf continued > "$SETUP_VP_TEST_CONTINUED"\n');
+        expect(runInstaller().status).not.toBe(0);
+        expect(existsSync(continued)).toBe(false);
+      } finally {
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("dumps directories from the installer-resolved Windows shim", () => {
     const command = getInstallScriptCommand("https://example.com/install.ps1", "win32");
 
     expect(command.command).toBe("pwsh");
     expect(command.args[1]).toContain(". ([scriptblock]::Create");
     expect(command.args[1]).toContain("Join-Path $vpDir 'vp.exe'");
+    expect(command.args[1]).not.toContain("vp.cmd");
+    expect(command.args[1]).toContain("Test-Path -LiteralPath $vpPath -PathType Leaf");
+    expect(command.args[1]).toContain("setup-vp requires vp.exe in the installed bin directory");
     expect(command.args[1]).toContain("& $vpPath --version");
     expect(command.args[1]).toContain("$env:VP_DUMP_DIRS = '1'");
+    expect(command.args[1]).toContain("Set-Content -LiteralPath $dirsFile -Encoding UTF8");
+    expect(command.args[1]).toContain("Add-Content -LiteralPath $dirsFile -Encoding UTF8");
   });
+
+  it.skipIf(process.platform === "win32").each([true, false])(
+    "installs with wget and no curl, preserving download failures (detectDirs: %s)",
+    (detectDirs) => {
+      const root = mkdtempSync(join(tmpdir(), "setup-vp-wget-"));
+      const bin = join(root, "bin");
+      mkdirSync(bin);
+      try {
+        // An isolated PATH proves that the installer does not accidentally use
+        // curl from the host. The wget stub serves a local installer fixture.
+        for (const command of ["bash", "cat", "cp", "mktemp", "rm"]) {
+          const executable = spawnSync("sh", ["-c", `command -v ${command}`], {
+            encoding: "utf8",
+          }).stdout.trim();
+          symlinkSync(executable, join(bin, command));
+        }
+        writeFileSync(
+          join(bin, "wget"),
+          `#!/bin/bash
+[ "$1 $2 $3 $4 $5 $6" = '-q -T 15 -t 1 -O' ] || exit 99
+if [ "$7" = '-' ]; then cat "$SETUP_VP_TEST_INSTALLER"; else cp "$SETUP_VP_TEST_INSTALLER" "$7"; fi
+`,
+        );
+        chmodSync(join(bin, "wget"), 0o755);
+        const installer = join(root, "install.sh");
+        const marker = join(root, "installed");
+        writeFileSync(installer, 'printf installed > "$SETUP_VP_TEST_MARKER"\n');
+        const command = getInstallScriptCommand(
+          "https://example.invalid/install.sh",
+          "linux",
+          detectDirs,
+        );
+        const execute = () =>
+          spawnSync(command.command, command.args, {
+            encoding: "utf8",
+            env: {
+              PATH: bin,
+              HOME: root,
+              TMPDIR: root,
+              BASH_ENV: "/dev/null",
+              SETUP_VP_DIRS_FILE: join(root, "dirs"),
+              SETUP_VP_TEST_INSTALLER: installer,
+              SETUP_VP_TEST_MARKER: marker,
+            },
+          });
+        const result = execute();
+        expect(result.status, result.stderr).toBe(0);
+        expect(readFileSync(marker, "utf8")).toBe("installed");
+        rmSync(marker);
+        writeFileSync(join(bin, "wget"), "#!/bin/bash\nexit 8\n");
+        expect(execute().status).toBe(8);
+        expect(existsSync(marker)).toBe(false);
+        rmSync(join(bin, "wget"));
+        const missing = execute();
+        expect(missing.status).toBe(127);
+        expect(missing.stderr).toContain("curl or wget is required");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.each([
     ["linux" as const, "install.sh", "| bash"],
