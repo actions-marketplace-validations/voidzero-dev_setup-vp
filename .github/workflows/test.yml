@@ -854,6 +854,24 @@ jobs:
           fi
           echo "OK: composed sfw blocked lodahs (exit $CODE, block-line found)"
 
+  test-gitlab-cache-snapshot:
+    name: GitLab cache snapshot regression (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.15.0
+      - name: Verify repeated saves with Bun-style directory symlinks
+        run: node --test test/cache-snapshot.test.mjs
+
   test-azure-runtime:
     strategy:
       fail-fast: false
@@ -889,6 +907,21 @@ jobs:
         shell: pwsh
         run: |
           [scriptblock]::Create((Get-Content -Raw azure/bootstrap.ps1)) > $null
+          [scriptblock]::Create((Get-Content -Raw gitlab/bootstrap.ps1)) > $null
+
+  test-portable-process:
+    name: Portable Windows command and cache regressions
+    runs-on: windows-latest
+    env:
+      VP_PR_VERSION: ""
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+      - name: Setup Vite+ and test dependencies
+        uses: ./
+        with:
+          node-version-file: .node-version
+      - name: Test native Windows executables and cache links
+        run: vp run test src/ci/process.test.ts src/ci/cache-snapshot.test.ts
 
   build:
     runs-on: ubuntu-latest

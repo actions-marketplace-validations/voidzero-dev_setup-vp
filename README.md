@@ -281,7 +281,7 @@ steps:
 
 `sfw` is only applied when `run-install` is enabled; other `vp` commands (e.g. `vp env use`, `vp --version`) run unwrapped.
 
-The action pins the `sfw` version it downloads so a re-run of the same commit gets the same binary; [Renovate](https://docs.renovatebot.com/) opens a PR whenever SocketDev publishes a new `sfw-free` release (see [`.github/renovate.json`](.github/renovate.json)).
+The action pins the `sfw` version it downloads so a re-run of the same commit gets the same binary.
 
 #### Advanced: stricter supply chain via `socketdev/action`
 
@@ -433,10 +433,6 @@ Disabling cache saving doesn't change the `cache-hit` output, which continues to
 
 setup-vp also provides a GitLab CI/CD remote template hosted from this GitHub repository. Because this repository is not a GitLab CI/CD component project, GitLab users should load it with `include:remote` instead of `include:component`.
 
-See [GitLab integration notes](rfcs/gitlab-integration.md) for the design background, constraints, and follow-up work.
-
-The dedicated [GitLab end-to-end test project](https://gitlab.com/fengmk2/setup-vp-gitlab-test) tests same-repository pull requests, approved fork pull requests, merge queue commits, merges, and releases. The pipeline loads the template, bootstrap script, and compiled runtime from the exact setup-vp commit or release tag that it tests.
-
 ### Basic GitLab Usage
 
 Use an exact release tag in the `include:remote` URL, and pin `setup-ref` to the same tag so the bootstrap and compiled runtime are downloaded from the same version as the included template:
@@ -555,17 +551,51 @@ test:
 
 ### GitLab Inputs
 
-| Input               | Description                                                                                                                                                                                                 | Default               |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| `version`           | Version of Vite+ to install                                                                                                                                                                                 | `latest`              |
-| `working-directory` | Project directory used for relative paths and default `vp install` execution                                                                                                                                | `.`                   |
-| `run-install`       | String input for `vp install` after setup. Use `"true"`/`"false"` or a YAML object/list with `cwd`/`args`                                                                                                   | `true`                |
-| `sfw`               | Wrap `vp install` with [Socket Firewall Free](https://docs.socket.dev/docs/socket-firewall-free)                                                                                                            | `false`               |
-| `node-manager`      | String input: `"false"` keeps the runner image's Node.js (disables Node.js management after installation); `"true"` leaves the installer default unchanged; empty lets the installer decide (enabled on CI) |                       |
-| `package-manager`   | String input: `"true"`, `"false"`, or a YAML mapping of npm, pnpm, yarn, and bun to booleans (Vite+ 0.3.1+)                                                                                                 | Unset (enabled on CI) |
-| `registry-url`      | Optional registry URL to write to a temporary `.npmrc`                                                                                                                                                      |                       |
-| `scope`             | Optional scope for authenticating against scoped registries                                                                                                                                                 |                       |
-| `setup-ref`         | setup-vp ref used to download the GitLab bootstrap and compiled runtime. Always set it to the same tag as the remote URL; the default is the latest release when the template was published                 | `v1.20.0`             |
+| Input                   | Description                                                                                                                                                                                                 | Default               |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| `version`               | Explicit Vite+ version or dist-tag; empty auto-detects from the project                                                                                                                                     | Auto-detected         |
+| `version-file`          | Read Vite+ from `package.json`, `pnpm-workspace.yaml`, or `.yarnrc.yml`                                                                                                                                     |                       |
+| `node-version`          | Node.js version selected with `vp env use`                                                                                                                                                                  |                       |
+| `node-version-file`     | Read Node.js from `.nvmrc`, `.node-version`, `.tool-versions`, or `package.json`                                                                                                                            |                       |
+| `cache-dependency-path` | Lock file relative to `working-directory`; otherwise auto-detect                                                                                                                                            |                       |
+| `cache-policy`          | Native policy for `.setup-vp-cached`: `pull-push` or restore-only `pull`                                                                                                                                    | `pull-push`           |
+| `cache-namespace`       | Cache partition; set an OS/architecture label to share across compatible runners                                                                                                                            | `$CI_RUNNER_ID`       |
+| `working-directory`     | Project directory used for relative paths and default `vp install` execution                                                                                                                                | `.`                   |
+| `run-install`           | String input for `vp install` after setup. Use `"true"`/`"false"` or a YAML object/list with `cwd`/`args`                                                                                                   | `true`                |
+| `sfw`                   | Wrap `vp install` with [Socket Firewall Free](https://docs.socket.dev/docs/socket-firewall-free)                                                                                                            | `false`               |
+| `node-manager`          | String input: `"false"` keeps the runner image's Node.js (disables Node.js management after installation); `"true"` leaves the installer default unchanged; empty lets the installer decide (enabled on CI) |                       |
+| `package-manager`       | String input: `"true"`, `"false"`, or a YAML mapping of npm, pnpm, yarn, and bun to booleans (Vite+ 0.3.1+)                                                                                                 | Unset (enabled on CI) |
+| `registry-url`          | Optional registry URL to write to a temporary `.npmrc`                                                                                                                                                      |                       |
+| `scope`                 | Optional scope for authenticating against scoped registries                                                                                                                                                 |                       |
+| `setup-ref`             | setup-vp ref used to download the GitLab bootstrap and compiled runtime. Always set it to the same tag as the remote URL; the default is the latest release when the template was published                 | `v1.20.0`             |
+
+### GitLab Caching and Outputs
+
+These additions require a template and matching `setup-ref` that contain the changes. Pin an immutable commit while testing unreleased functionality; `v1.20.0` predates the new interfaces.
+
+Extend `.setup-vp-cached` to restore and save dependency data and the pinned `sfw` binary through GitLab's native cache. The runtime copies restored data from `.setup-vp-cache/` into the directory reported by `vp pm cache dir`. It saves a snapshot after setup and again in `after_script`, so packages added by later job scripts are included.
+
+Set the include input `cache-policy: pull` to restore without uploading a cache. GitLab restores before setup, so this policy must be set in YAML, not changed during a script. Cache snapshots separate OS, architecture, and package manager; the exact lock-file hash determines `SETUP_VP_CACHE_HIT`. A compatible snapshot from an older lock file can still supply packages on a miss.
+
+By default, you get a separate cache key for each runner. Set the include input `cache-namespace: linux-amd64` to share caches across runners with that OS and architecture. Use distinct labels for other platforms. Keep the default if you cannot guarantee that runners in a shared namespace use compatible platforms. Set this input in YAML; a script runs after cache restoration.
+
+```yaml
+test:
+  extends: .setup-vp-cached
+  image: node:24
+  script:
+    - vp run test
+    - echo "$SETUP_VP_INSTALLED_VERSION / $SETUP_VP_CACHE_HIT"
+  artifacts:
+    reports:
+      dotenv: .setup-vp-outputs.env
+```
+
+The two output variables are available in the current job. The optional dotenv report passes them to downstream jobs; it contains no auth tokens. Keep `.setup-vp-cache/` as the only cache path. The generated `.setup-vp-runtime.mjs` and `.setup-vp-cache-state.json` support post-job saving and must not be cached. If you replace `after_script`, include `!reference [.setup-vp-cached, after_script]` in your own array. Override the job's native `cache` mapping when you need different keys or additional cache paths. [GitLab cache behavior](https://docs.gitlab.com/ci/caching/)
+
+### GitLab Windows Runners
+
+Include `gitlab/setup-vp-windows.yml` instead of `gitlab/setup-vp.yml` on a PowerShell runner with Node.js available. It exposes the same inputs, `.setup-vp`, `.setup-vp-bootstrap`, and `.setup-vp-cached` jobs. The PowerShell bootstrap uses the shared installer and exports environment variables for subsequent commands. Use only one of the two templates in a pipeline.
 
 ### GitLab Notes
 
@@ -574,15 +604,13 @@ test:
 - Quote GitLab string inputs such as `run-install: "false"`; unquoted booleans are rejected by GitLab before the setup runtime can parse them.
 - GitLab 17.9+ users can add `integrity` to pin the remote file hash.
 - The template expects a Unix-like runner image with Node.js, `bash`, and either `curl` or `wget`.
-- The GitLab runtime source is TypeScript under `src/gitlab/`, but the template downloads and runs the `vp pack` generated JavaScript bundle from `dist/gitlab/index.mjs`.
-- The GitLab template does not set up Node.js. Use a Node image such as `node:24`, or install Node.js before extending `.setup-vp`. The Vite+ installer still enables its own Node.js manager on CI; set `node-manager: "false"` to keep the image's Node.js for `vp` commands.
-- The GitLab template intentionally does not expose `cache` or `cache-dependency-path` inputs. GitLab restores job cache before `before_script`, so this template cannot compute cache paths during setup and restore them for the same job. Configure GitLab `cache:` directly on the job when needed.
+- Node.js must be available to start the bootstrap. Set `node-version` or `node-version-file` to select the project runtime with `vp env use`. Neither can be combined with `node-manager: "false"`; omit both to retain Vite+'s normal project-based resolution.
+- Vite+ version precedence matches GitHub Actions: explicit `version`, explicit `version-file`, project package/catalog pin, lockfile, then `latest`. Paths are relative to `working-directory`. An unresolvable explicit `version-file` warns and falls back to `latest`.
+- Without `registry-url`, an existing project `.npmrc` is inspected for registry auth. Missing token entries use `NODE_AUTH_TOKEN` when available; existing entries and referenced token variables are preserved.
 
 ## Azure Pipelines
 
-setup-vp also provides an Azure Pipelines step template hosted from this GitHub repository. Azure cannot execute the GitHub Action bundle directly, so the template downloads a compiled runtime (`dist/azure/index.mjs`) and runs it in `prepare` and `finalize` phases around Azure's native `Cache@2` task.
-
-See [Azure Pipelines integration notes](rfcs/azure-pipelines-integration.md) for the design background, parity table, and cache semantics.
+setup-vp also provides an Azure Pipelines step template hosted from this GitHub repository.
 
 ### Basic Azure Usage
 
@@ -617,20 +645,27 @@ Pin `ref` and `setupRef` to the same exact tag or commit SHA. Do not use the `v1
 
 ### Azure Parameters
 
-| Parameter             | Default               | Description                                                                                                                                                                   |
-| --------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `version`             | `latest`              | Vite+ version/dist-tag passed to the official installer.                                                                                                                      |
-| `workingDirectory`    | `.`                   | Project directory for lock detection and default `vp install`.                                                                                                                |
-| `runInstall`          | `true`                | Run `vp install`; accepts boolean or object/list with `cwd` and `args`.                                                                                                       |
-| `sfw`                 | `false`               | Wrap `vp install` with Socket Firewall Free.                                                                                                                                  |
-| `registryUrl`         |                       | Optional registry URL for a temporary `.npmrc`.                                                                                                                               |
-| `scope`               |                       | Optional npm registry scope.                                                                                                                                                  |
-| `setupRef`            | `v1.20.0`             | Ref used to download bootstrap scripts and `dist/azure/index.mjs`. Always set it to the same tag as `ref`; the default is the latest release when the template was published. |
-| `nodeVersion`         | `24.x`                | Passed to `UseNode@1`; an empty string skips Node setup.                                                                                                                      |
-| `nodeManager`         |                       | Control Vite+'s Node.js manager: `false` keeps the agent's Node.js (e.g. from `UseNode@1`); `true` leaves the installer default unchanged; empty lets the installer decide.   |
-| `packageManager`      | Unset (enabled on CI) | Boolean or object mapping npm, pnpm, yarn, and bun to booleans (Vite+ 0.3.1+). Only false entries change modes.                                                               |
-| `cache`               | `false`               | Enable Azure `Cache@2` around the package-manager cache directory.                                                                                                            |
-| `cacheDependencyPath` |                       | Explicit lock file relative to `workingDirectory`; otherwise auto-detect.                                                                                                     |
+| Parameter              | Default               | Description                                                                                                                                                                   |
+| ---------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `version`              | Auto-detected         | Explicit Vite+ version/dist-tag; empty uses the same resolution rules as GitHub and GitLab.                                                                                   |
+| `versionFile`          |                       | Vite+ version file relative to `workingDirectory`.                                                                                                                            |
+| `nodeVersionFile`      |                       | Node.js version file relative to `workingDirectory`.                                                                                                                          |
+| `bootstrapNodeVersion` | `24.x`                | Passed to `UseNode@1` to start the setup runtime; empty uses the agent's existing Node.js.                                                                                    |
+| `stepName`             | `setupVp`             | Prefix for named finalize tasks and their output variables. Use a unique prefix for each template invocation.                                                                 |
+| `workingDirectory`     | `.`                   | Project directory for lock detection and default `vp install`.                                                                                                                |
+| `runInstall`           | `true`                | Run `vp install`; accepts boolean or object/list with `cwd` and `args`.                                                                                                       |
+| `sfw`                  | `false`               | Wrap `vp install` with Socket Firewall Free.                                                                                                                                  |
+| `authEnv`              | `{}`                  | Extra environment mappings for custom registry secrets, such as `{ PRIVATE_TOKEN: "$(PRIVATE_TOKEN)" }`.                                                                      |
+| `registryUrl`          |                       | Optional registry URL for a temporary `.npmrc`.                                                                                                                               |
+| `scope`                |                       | Optional npm registry scope.                                                                                                                                                  |
+| `setupRef`             | `v1.20.0`             | Ref used to download bootstrap scripts and `dist/azure/index.mjs`. Always set it to the same tag as `ref`; the default is the latest release when the template was published. |
+| `nodeVersion`          |                       | Select Node.js with `vp env use`; takes precedence over `nodeVersionFile`.                                                                                                    |
+| `nodeManager`          |                       | Control Vite+'s Node.js manager: `false` keeps the agent's Node.js (e.g. from `UseNode@1`); `true` leaves the installer default unchanged; empty lets the installer decide.   |
+| `packageManager`       | Unset (enabled on CI) | Boolean or object mapping npm, pnpm, yarn, and bun to booleans (Vite+ 0.3.1+). Only false entries change modes.                                                               |
+| `cache`                | `false`               | Enable Azure `Cache@2` around the package-manager cache directory.                                                                                                            |
+| `cacheDependencyPath`  |                       | Explicit lock file relative to `workingDirectory`; otherwise auto-detect.                                                                                                     |
+
+On refs containing these changes, `nodeVersion` selects the managed project runtime. Use `bootstrapNodeVersion` for the previous `UseNode@1` behavior, including when `nodeManager: "false"`. Explicit Node selection conflicts with `nodeManager: "false"`. The setup runtime keeps its bootstrap Node executable across phases.
 
 ### Azure Job Variables
 
@@ -641,10 +676,15 @@ Pin `ref` and `setupRef` to the same exact tag or commit SHA. Do not use the `v1
 
 `vp`, `NPM_CONFIG_USERCONFIG`, and `PNPM_CONFIG_USERCONFIG` are available to later steps in the same job. Define `NODE_AUTH_TOKEN` as an Azure secret pipeline variable when private registry auth is required; the template maps it into both finalize tasks.
 
+Finalize tasks also expose `version` and `cacheHit` as named outputs. Use `$(setupVpUnix.version)` on Linux/macOS or `$(setupVpWindows.version)` on Windows; `stepName` changes the prefix. `cacheHit` is `true` only for an exact match, while the job variable retains Azure's `inexact` value. Cross-job consumers use Azure's `dependencies.<job>.outputs['setupVpUnix.version']` syntax. [Azure output variables](https://learn.microsoft.com/en-us/azure/devops/pipelines/process/set-variables-scripts?view=azure-devops)
+
+Without `registryUrl`, the runtime can supplement the project's `.npmrc` with `NODE_AUTH_TOKEN`. Other referenced token variables are propagated as secret pipeline variables, not public outputs. Pass custom secret mappings through `authEnv`, for example `authEnv: { CUSTOM_TOKEN: "$(CUSTOM_TOKEN)" }`. Azure does not automatically put secret pipeline variables in task environments.
+
 ### Azure Notes
 
 - The template supports Microsoft-hosted Linux, macOS, and Windows agents.
-- `Cache@2` restores before `vp install` and saves automatically in a post-job step.
+- `Cache@2` restores before `vp install` and saves automatically in a post-job step. It has no supported restore-only input, so Azure does not expose GitHub's `cache-save` control. [Azure pipeline caching](https://learn.microsoft.com/en-us/azure/devops/pipelines/release/caching?view=azure-devops)
+- When `sfw` is enabled for an install, a separate native cache reuses its version/platform-specific binary. Both portable runtimes support full YAML install entries and retry the known `sfw` command-lookup failure once.
 - Missing lock files or cache paths degrade to a warning and `SETUP_VP_CACHE_READY=false` instead of failing setup.
 - For Azure Artifacts feeds, compose with Azure's `npmAuthenticate` task and/or pass `registryUrl` plus `NODE_AUTH_TOKEN`.
 
@@ -675,68 +715,9 @@ jobs:
       - run: vp run test
 ```
 
-## Development
+## Contributing
 
-### Install Vite+ CLI
-
-- **Linux / macOS:** `curl -fsSL https://viteplus.dev/install.sh | bash`
-- **Windows:** `irm https://viteplus.dev/install.ps1 | iex`
-
-### Setup
-
-```bash
-git clone https://github.com/voidzero-dev/setup-vp.git
-cd setup-vp
-vp install
-```
-
-### Available Commands
-
-| Command             | Description              |
-| ------------------- | ------------------------ |
-| `vp run build`      | Build (outputs to dist/) |
-| `vp run test`       | Run tests                |
-| `vp run test:watch` | Run tests in watch mode  |
-| `vp run typecheck`  | Type check               |
-| `vp run check`      | Lint + format check      |
-| `vp run check:fix`  | Auto-fix lint/format     |
-
-### Before Committing
-
-- Run `vp run check:fix` and `vp run build`
-- Generated files under `dist/` must be committed, including `dist/index.mjs` for the GitHub Action, `dist/gitlab/index.mjs` for the GitLab template, and `dist/azure/index.mjs` for the Azure Pipelines runtime
-- Pre-commit hooks (via husky + lint-staged) will automatically run `vp check --fix` on staged files via `vpx lint-staged`
-
-### GitLab E2E for Fork Pull Requests
-
-After reviewing the commit, a maintainer with write access can add `run-e2e` to run the full GitLab suite. Approve the Actions run if prompted.
-
-For new commits, review the changes and remove and re-add `run-e2e`. Results and the GitLab pipeline link appear in a PR comment, which is updated after each run.
-
-### Releasing
-
-Releases are published as git tags; there is no npm package, but the `package.json` version tracks the latest release. Consumers pin an exact version tag such as `voidzero-dev/setup-vp@v1.20.0` or a commit SHA. The `v1` major tag is frozen at v1.15.0 and is never moved (an org-level ruleset rejects tag force-pushes).
-
-To cut a release:
-
-1. Open and merge a PR that bumps the upcoming version in `package.json`, the README examples, and the `setup-ref` / `setupRef` defaults in `gitlab/setup-vp.yml` and `azure/setup-vp.yml` (with the matching assertion in `src/azure/template.test.ts`).
-
-2. Update `main` and confirm `dist/index.mjs` is in sync (the working tree must stay clean after building):
-
-   ```bash
-   git checkout main && git pull --ff-only
-   vp run build
-   git status --short   # must be empty
-   ```
-
-3. Confirm that the release commit on `main` passes the full GitLab E2E workflow.
-
-4. Create the new annotated version tag and push it. For example:
-
-   ```bash
-   git tag -a v1.20.0 -m "v1.20.0"
-   git push origin v1.20.0
-   ```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, tests, integration design, and release instructions.
 
 ## Feedback
 
